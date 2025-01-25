@@ -13,16 +13,11 @@
 #include <Uxtheme.h>
 #include <VSStyle.h>
 #include <propkey.h>
+#include <propvarutil.h>
 #include <htmlhelp.h>
 #include <vector>
 #include <map>
 #include <algorithm>
-
-#ifdef BUILD_SETUP
-#define DOC_PATH L""
-#else
-#define DOC_PATH L"..\\..\\Docs\\Help\\"
-#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -793,10 +788,7 @@ CString CSettingsManager::LoadSettingsXml( const wchar_t *fname )
 					}
 					string.push_back(0);
 					pSetting->value=CComVariant(&string[0]);
-					if (pSetting->value==pSetting->defValue)
-						pSetting->flags|=CSetting::FLAG_DEFAULT;
-					else
-						pSetting->flags&=~CSetting::FLAG_DEFAULT;
+					pSetting->flags&=~CSetting::FLAG_DEFAULT;
 				}
 				else
 				{
@@ -809,10 +801,7 @@ CString CSettingsManager::LoadSettingsXml( const wchar_t *fname )
 							if (pSetting->type>=CSetting::TYPE_STRING)
 							{
 								pSetting->value=value;
-								if (pSetting->value==pSetting->defValue)
-									pSetting->flags|=CSetting::FLAG_DEFAULT;
-								else
-									pSetting->flags&=~CSetting::FLAG_DEFAULT;
+								pSetting->flags&=~CSetting::FLAG_DEFAULT;
 							}
 							else if (pSetting->type==CSetting::TYPE_BOOL || (pSetting->type==CSetting::TYPE_INT && pSetting[1].type!=CSetting::TYPE_RADIO) || pSetting->type==CSetting::TYPE_HOTKEY || pSetting->type==CSetting::TYPE_HOTKEY_ANY || pSetting->type==CSetting::TYPE_COLOR)
 							{
@@ -821,10 +810,7 @@ CString CSettingsManager::LoadSettingsXml( const wchar_t *fname )
 									pSetting->value=CComVariant(val?1:0);
 								else
 									pSetting->value=CComVariant(val);
-								if (pSetting->value==pSetting->defValue)
-									pSetting->flags|=CSetting::FLAG_DEFAULT;
-								else
-									pSetting->flags&=~CSetting::FLAG_DEFAULT;
+								pSetting->flags&=~CSetting::FLAG_DEFAULT;
 							}
 							else if (pSetting->type==CSetting::TYPE_INT && pSetting[1].type==CSetting::TYPE_RADIO)
 							{
@@ -834,10 +820,7 @@ CString CSettingsManager::LoadSettingsXml( const wchar_t *fname )
 									if (_wcsicmp(pRadio->name,value.bstrVal)==0)
 									{
 										pSetting->value=CComVariant(val);
-										if (pSetting->value==pSetting->defValue)
-											pSetting->flags|=CSetting::FLAG_DEFAULT;
-										else
-											pSetting->flags&=~CSetting::FLAG_DEFAULT;
+										pSetting->flags&=~CSetting::FLAG_DEFAULT;
 										break;
 									}
 								}
@@ -996,7 +979,7 @@ void CSettingsManager::ResetSettings( void )
 HIMAGELIST CSettingsManager::GetImageList( HWND tree )
 {
 	if (m_ImageList) return m_ImageList;
-	HTHEME theme=OpenThemeData(tree,L"button");
+	HTHEME theme=OpenThemeData(GetParent(tree),L"button");
 	HDC hdc=CreateCompatibleDC(NULL);
 	int iconSize=(TreeView_GetItemHeight(tree)<32)?16:32;
 	int checkSize=16;
@@ -1126,7 +1109,7 @@ class CSettingsDlg: public CResizeableDlg<CSettingsDlg>
 {
 public:
 	CSettingsDlg( void );
-	void Init( CSetting *pSettings, ICustomSettings *pCustom, int tab );
+	void Init( CSetting *pSettings, ICustomSettings *pCustom, int tab, const wchar_t* appId );
 
 	BEGIN_MSG_MAP( CSettingsDlg )
 		MESSAGE_HANDLER( WM_INITDIALOG, OnInitDialog )
@@ -1200,6 +1183,7 @@ private:
 	bool m_bIgnoreEdit;
 	bool m_bDirty;
 	CString m_FilterText;
+	const wchar_t* m_AppId;
 
 	void AddTabs( int name, const CSetting *pSelect=NULL );
 	void SetCurTab( int index, bool bReset, const CSetting *pSelect=NULL );
@@ -1232,15 +1216,17 @@ CSettingsDlg::CSettingsDlg( void )
 	m_bOnTop=false;
 	m_bIgnoreEdit=false;
 	m_bDirty=false;
+	m_AppId=NULL;
 }
 
-void CSettingsDlg::Init( CSetting *pSettings, ICustomSettings *pCustom, int tab )
+void CSettingsDlg::Init( CSetting *pSettings, ICustomSettings *pCustom, int tab, const wchar_t* appId )
 {
 	m_pSettings=pSettings;
 	m_pCustom=pCustom;
 	m_InitialTab=tab;
 	m_FilterText.Empty();
 	m_bDirty=false;
+	m_AppId=appId;
 }
 
 // Subclass the tooltip to delay the tip when the mouse moves from one tree item to the next
@@ -1264,17 +1250,19 @@ LRESULT CSettingsDlg::OnInitDialog( UINT uMsg, WPARAM wParam, LPARAM lParam, BOO
 #ifdef _DEBUG
 	g_bUIThread=true;
 #endif
-/*
-	// attempt to make the dialog have its own icon. doesn't work though. the icon changes, but to the default folder icon
-	CComPtr<IPropertyStore> pStore;
-	if (SUCCEEDED(SHGetPropertyStoreForWindow(m_hWnd,IID_IPropertyStore,(void**)&pStore)))
+
+	if (m_AppId)
 	{
-		PROPVARIANT val;
-		val.vt=VT_LPWSTR;
-		val.pwszVal=L"OpenShell.Settings.Dialog";
-		pStore->SetValue(PKEY_AppUserModel_ID,val);
+		// attempt to make the dialog have its own icon
+		CComPtr<IPropertyStore> pStore;
+		if (SUCCEEDED(SHGetPropertyStoreForWindow(m_hWnd,IID_IPropertyStore,(void**)&pStore)))
+		{
+			PROPVARIANT val;
+			InitPropVariantFromString(m_AppId,&val);
+			pStore->SetValue(PKEY_AppUserModel_ID,val);
+		}
 	}
-*/
+
 	InitResize(MOVE_MODAL);
 	HMENU menu=GetSystemMenu(FALSE);
 	bool bAdded=false;
@@ -1858,7 +1846,7 @@ bool CSettingsDlg::IsTabValid( void )
 
 static CSettingsDlg g_SettingsDlg;
 
-void EditSettings( const wchar_t *title, bool bModal, int tab )
+void EditSettings( const wchar_t *title, bool bModal, int tab, const wchar_t* appId )
 {
 	if (g_SettingsDlg.m_hWnd)
 	{
@@ -1876,7 +1864,7 @@ void EditSettings( const wchar_t *title, bool bModal, int tab )
 		}
 		DLGTEMPLATE *pTemplate=LoadDialogEx(IDD_SETTINGS);
 		g_SettingsManager.ResetImageList();
-		g_SettingsDlg.Init(g_SettingsManager.GetSettings(),g_SettingsManager.GetCustom(),tab);
+		g_SettingsDlg.Init(g_SettingsManager.GetSettings(),g_SettingsManager.GetCustom(),tab,appId);
 		g_SettingsDlg.Create(NULL,pTemplate);
 		g_SettingsDlg.SetWindowText(title);
 		g_SettingsDlg.SetWindowPos(HWND_TOPMOST,0,0,0,0,SWP_NOSIZE|SWP_NOMOVE|(g_SettingsDlg.GetOnTop()?0:SWP_NOZORDER)|SWP_SHOWWINDOW);
@@ -1964,6 +1952,13 @@ bool ImportSettingsXml( const wchar_t *fname )
 	if (error.IsEmpty())
 	{
 		g_SettingsManager.SaveSettings(false);
+
+		// we have successfuly imported settings from XML
+		// so there is no need to show settings dialog when start menu is triggered for the first time
+		CRegKey regKey;
+		if (regKey.Open(HKEY_CURRENT_USER,GetSettingsRegPath())==ERROR_SUCCESS)
+			regKey.SetDWORDValue(L"ShowedStyle2",1);
+
 		return true;
 	}
 
@@ -2190,7 +2185,7 @@ bool HasHelp( void )
 	GetModuleFileName(_AtlBaseModule.GetResourceInstance(),path,_countof(path));
 	*PathFindFileName(path)=0;
 	wchar_t topic[_MAX_PATH];
-	Sprintf(topic,_countof(topic),L"%s%sOpenShell.chm",path,GetDocRelativePath());
+	Sprintf(topic,_countof(topic),L"%sOpenShell.chm",path);
 	return (GetFileAttributes(topic)!=INVALID_FILE_ATTRIBUTES);
 }
 
@@ -2200,7 +2195,7 @@ void ShowHelp( void )
 	GetModuleFileName(_AtlBaseModule.GetResourceInstance(),path,_countof(path));
 	*PathFindFileName(path)=0;
 	wchar_t topic[_MAX_PATH];
-	Sprintf(topic,_countof(topic),L"%s%sOpenShell.chm::/%s.html",path,GetDocRelativePath(),PathFindFileName(g_SettingsManager.GetRegPath()));
+	Sprintf(topic,_countof(topic),L"%sOpenShell.chm::/%s.html",path,PathFindFileName(g_SettingsManager.GetRegPath()));
 	HtmlHelp(GetDesktopWindow(),topic,HH_DISPLAY_TOPIC,NULL);
 }
 

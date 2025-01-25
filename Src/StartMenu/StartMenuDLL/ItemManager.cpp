@@ -136,6 +136,8 @@ static void CreateAppResolver( void )
 
 static bool DetectGrayscaleImage( const unsigned int *bits, int stride, int width, int height )
 {
+	if (width==0 || height==0)
+		return false;
 	int transparent=0;
 	for (int y=0;y<height;y++,bits+=stride)
 	{
@@ -489,7 +491,8 @@ void CItemManager::LoadIconData::Init( void )
 			HIMAGELIST_QueryInterface(m_TempLists[i],IID_IImageList2,(void**)&m_pTempLists[i]);
 		}
 	}
-	m_pFactory.CoCreateInstance(CLSID_WICImagingFactory);
+	if (FAILED(m_pFactory.CoCreateInstance(CLSID_WICImagingFactory)))
+		m_pFactory.CoCreateInstance(CLSID_WICImagingFactory1);
 }
 
 void CItemManager::LoadIconData::Close( void )
@@ -1122,6 +1125,14 @@ const CItemManager::ItemInfo *CItemManager::GetCustomIcon( const wchar_t *path, 
 		*c=0;
 		index=-_wtol(c+1);
 	}
+	// special handling for Apps icon
+	if (!text[0] && index==-IDI_APPSICON)
+	{
+		if (IsWin11())
+			index=-IDI_APPSICON11;
+		else if (GetWinVersion()==WIN_VER_WIN10)
+			index=-IDI_APPSICON10;
+	}
 	return GetCustomIcon(text,index,iconSizeType,false);
 }
 
@@ -1155,6 +1166,10 @@ const CItemManager::ItemInfo* CItemManager::GetLinkIcon(IShellLink* link, TIconS
 						CComPtr<IResourceMap> resMap;
 						if (SUCCEEDED(resManager->GetMainResourceMap(IID_PPV_ARGS(&resMap))))
 						{
+							CComPtr<IResourceContext> resContext;
+							if (SUCCEEDED(resManager->GetDefaultContext(IID_PPV_ARGS(&resContext))))
+								resContext->SetTargetSize(GetIconSize(iconSizeType));
+
 							CComString location;
 							if (SUCCEEDED(resMap->GetFilePath(logoUri, &location)))
 								return GetCustomIcon(location, -65536, iconSizeType, true);
@@ -3574,6 +3589,26 @@ void CItemManager::ClearCache( void )
 	item.smallIcon=m_DefaultSmallIcon;
 	item.largeIcon=m_DefaultLargeIcon;
 	item.extraLargeIcon=m_DefaultExtraLargeIcon;
+}
+
+int CItemManager::GetIconSize(TIconSizeType iconSizeType) const
+{
+	switch (iconSizeType)
+	{
+	case ICON_SIZE_TYPE_SMALL:
+	case ICON_SIZE_TYPE_SMALL_METRO:
+		return SMALL_ICON_SIZE;
+
+	case ICON_SIZE_TYPE_LARGE:
+	case ICON_SIZE_TYPE_LARGE_METRO:
+		return LARGE_ICON_SIZE;
+
+	case ICON_SIZE_TYPE_EXTRA_LARGE:
+	case ICON_SIZE_TYPE_EXTRA_LARGE_METRO:
+		return EXTRA_LARGE_ICON_SIZE;
+	}
+
+	return 0;
 }
 
 // retrieves the pidl and the SFGAO_FOLDER, SFGAO_STREAM, SFGAO_LINK flags for the path

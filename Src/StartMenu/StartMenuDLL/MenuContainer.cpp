@@ -335,7 +335,6 @@ bool CMenuContainer::s_bDragMovable;
 bool CMenuContainer::s_bRightDrag;
 bool CMenuContainer::s_bLockWorkArea;
 bool CMenuContainer::s_bPendingSearchEnter;
-bool CMenuContainer::s_bMoreResults;
 std::vector<CMenuContainer*> CMenuContainer::s_Menus;
 volatile HWND CMenuContainer::s_FirstMenu, CMenuContainer::s_SearchMenu;
 CSearchManager::SearchResults CMenuContainer::s_SearchResults;
@@ -345,7 +344,8 @@ bool CMenuContainer::s_bMRULoaded=false;
 const CItemManager::ItemInfo *CMenuContainer::s_JumpAppInfo;
 CJumpList CMenuContainer::s_JumpList;
 int CMenuContainer::s_TaskBarId;
-HWND CMenuContainer::s_TaskBar, CMenuContainer::s_StartButton;
+HWND CMenuContainer::s_TaskBar;
+HWND CMenuContainer::s_StartButton;	// custom start button (if any)
 UINT CMenuContainer::s_TaskBarEdge;
 RECT CMenuContainer::s_StartRect;
 HWND CMenuContainer::s_LastFGWindow;
@@ -568,7 +568,7 @@ LRESULT CALLBACK CMenuContainer::SubclassSearchBox( HWND hWnd, UINT uMsg, WPARAM
 		{
 			pParent->SendMessage(WM_SYSKEYDOWN,wParam,lParam);
 			if (wParam==VK_MENU)
-				pParent->ShowKeyboardCues();
+				pParent->ShowKeyboardCues(true);
 		}
 		else
 		{
@@ -861,8 +861,7 @@ void CMenuContainer::AddFirstFolder( IShellItem *pFolder, std::vector<MenuItem> 
 
 				if (bLibrary) flags&=~SFGAO_STREAM;
 				item.bLink=(flags&SFGAO_LINK)!=0;
-				item.bFolderLink=(flags&SFGAO_FOLDER && (!(flags&(SFGAO_STREAM|SFGAO_LINK)) || (s_bExpandLinks && item.bLink)));
-				item.bFolder=(!(options&CONTAINER_CONTROLPANEL) && !(options&CONTAINER_NOSUBFOLDERS) && item.bFolderLink);
+				item.bFolder=(!(options&CONTAINER_CONTROLPANEL) && !(options&CONTAINER_NOSUBFOLDERS) && (flags&SFGAO_FOLDER) && (!(flags&(SFGAO_STREAM|SFGAO_LINK)) || (s_bExpandLinks && item.bLink)));
 				{
 					CItemManager::RWLock lock(&g_ItemManager,false,CItemManager::RWLOCK_ITEMS);
 					if (item.pItemInfo->IsMetroLink())
@@ -1072,7 +1071,7 @@ void CMenuContainer::AddStandardItems( void )
 		const StdMenuItem *pInlineParent=NULL;
 		int searchProviderIndex=-1;
 		m_SearchProvidersCount=0;
-		MenuSkin::TIconSize mainIconSize=s_Skin.Main_icon_size;
+		bool bSecondColumn=false;
 		for (const StdMenuItem *pStdItem=m_pStdItem;;pStdItem++)
 		{
 			if (pStdItem->id==MENU_LAST)
@@ -1090,9 +1089,8 @@ void CMenuContainer::AddStandardItems( void )
 			if (m_bSubMenu && pStdItem->id==s_ShutdownCommand)
 				continue;
 
-			const bool bTwoColumns = (!m_bSubMenu && s_Skin.TwoColumns);
-			if (pStdItem->id==MENU_COLUMN_BREAK && bTwoColumns)
-				mainIconSize=s_Skin.Main2_icon_size;
+			if (pStdItem->id==MENU_COLUMN_BREAK && !m_bSubMenu && s_Skin.TwoColumns)
+				bSecondColumn=true;
 
 			int stdOptions=GetStdOptions(pStdItem->id);
 			if (!(stdOptions&MENU_ENABLED)) continue;
@@ -1273,6 +1271,10 @@ void CMenuContainer::AddStandardItems( void )
 			item.bSplit=item.bFolder && (item.pStdItem->settings&StdMenuItem::MENU_SPLIT_BUTTON)!=0;
 
 			// get icon
+			MenuSkin::TIconSize mainIconSize=!bSecondColumn ? s_Skin.Main_icon_size : s_Skin.Main2_icon_size;
+			if (item.bInline && mainIconSize==MenuSkin::ICON_SIZE_NONE)
+				mainIconSize=s_Skin.Main_icon_size;
+			
 			CItemManager::TIconSizeType iconSizeType;
 			int refreshFlags;
 			if (bSearchProvider7 || m_bSubMenu)
@@ -1585,6 +1587,23 @@ static const wchar_t *g_MfuIgnoreExes[]={
 	L"WLRMDR.EXE",
 	L"WUAPP.EXE",
 };
+
+static bool IgnoreUserAssistItem(const UserAssistItem& uaItem)
+{
+	static constexpr const wchar_t* ignoredNames[] =
+	{
+		DESKTOP_APP_ID,
+		L"Microsoft.Windows.ShellExperienceHost_cw5n1h2txyewy!App",
+	};
+
+	for (const auto& name : ignoredNames)
+	{
+		if (_wcsicmp(uaItem.name, name) == 0)
+			return true;
+	}
+
+	return false;
+}
 
 void CMenuContainer::GetRecentPrograms( std::vector<MenuItem> &items, int maxCount )
 {
@@ -1938,9 +1957,9 @@ void CMenuContainer::GetRecentPrograms( std::vector<MenuItem> &items, int maxCou
 					continue;
 				}
 
-				if (_wcsicmp(uaItem.name,DESKTOP_APP_ID)==0)
+				if (IgnoreUserAssistItem(uaItem))
 				{
-					LOG_MENU(LOG_MFU,L"UserAssist: Dropping: Ignore desktop");
+					LOG_MENU(LOG_MFU,L"UserAssist: Dropping: Ignore '%s'",uaItem.name);
 					continue;
 				}
 
@@ -2749,7 +2768,7 @@ bool CMenuContainer::InitSearchItems( void )
 		itemHeight=s_Skin.ItemSettings[MenuSkin::LIST_ITEM].itemHeight;
 		// total height minus the search box and the "more results"/"search internet", if present
 		maxHeight=m_Items[m_SearchIndex].itemRect.top-s_Skin.Main_search_padding.top-s_Skin.Search_padding.top;
-		maxHeight-=itemHeight*(m_SearchItemCount-(s_bMoreResults?1:2));
+		maxHeight-=itemHeight*(m_SearchItemCount-1);
 		if (!s_SearchResults.bSearching && !HasMoreResults())
 			maxHeight+=itemHeight;
 	}
@@ -2943,28 +2962,25 @@ bool CMenuContainer::InitSearchItems( void )
 	if (s_bWin7Style)
 	{
 		UpdateAccelerators(m_OriginalCount,(int)m_Items.size());
-		if (s_bMoreResults)
+		MenuItem &item=m_Items[m_SearchIndex-m_SearchItemCount+1];
+		if (s_SearchResults.bSearching)
 		{
-			MenuItem &item=m_Items[m_SearchIndex-m_SearchItemCount+1];
-			if (s_SearchResults.bSearching)
-			{
-				item.id=MENU_SEARCH_EMPTY;
-				item.name=FindTranslation(L"Menu.Searching",L"Searching...");
-				item.pItemInfo=g_ItemManager.GetCustomIcon(L"imageres.dll,8",CItemManager::ICON_SIZE_TYPE_SMALL);
-			}
-			else
-			{
-				item.id=MENU_MORE_RESULTS;
-				item.name=FindTranslation(L"Menu.MoreResults",L"See more results");
-				item.pItemInfo=g_ItemManager.GetCustomIcon(L"imageres.dll,177",CItemManager::ICON_SIZE_TYPE_SMALL);
-			}
+			item.id=MENU_SEARCH_EMPTY;
+			item.name=FindTranslation(L"Menu.Searching",L"Searching...");
+			item.pItemInfo=g_ItemManager.GetCustomIcon(L"imageres.dll,8",CItemManager::ICON_SIZE_TYPE_SMALL);
+		}
+		else
+		{
+			item.id=MENU_MORE_RESULTS;
+			item.name=FindTranslation(L"Menu.MoreResults",L"See more results");
+			item.pItemInfo=g_ItemManager.GetCustomIcon(L"imageres.dll,177",CItemManager::ICON_SIZE_TYPE_SMALL);
 		}
 	}
 	else
 	{
 		m_ScrollCount=(int)m_Items.size();
-			bool bInternet=GetSettingBool(L"SearchInternet");
-		if (s_bMoreResults && s_SearchResults.bSearching)
+		bool bInternet=GetSettingBool(L"SearchInternet");
+		if (s_SearchResults.bSearching)
 		{
 			MenuItem item(MENU_SEARCH_EMPTY);
 			item.name=FindTranslation(L"Menu.Searching",L"Searching...");
@@ -2979,7 +2995,7 @@ bool CMenuContainer::InitSearchItems( void )
 				item.name=FindTranslation(L"Menu.NoMatch",L"No items match your search.");
 				m_Items.push_back(item);
 			}
-			if (s_bMoreResults && HasMoreResults())
+			if (HasMoreResults())
 			{
 				{
 					MenuItem item(MENU_SEPARATOR);
@@ -5067,7 +5083,7 @@ void CMenuContainer::UpdateSearchResults( bool bForceShowAll )
 		g_SearchManager.BeginSearch(s_SearchResults.currentString);
 		s_SearchResults.bSearching=true;
 		s_bPendingSearchEnter=false;
-		if (s_bWin7Style && s_bMoreResults)
+		if (s_bWin7Style)
 		{
 			MenuItem &item=m_Items[m_SearchIndex-m_SearchItemCount+1];
 			item.id=MENU_SEARCH_EMPTY;
@@ -5093,8 +5109,14 @@ void CMenuContainer::UpdateSearchResults( bool bForceShowAll )
 }
 
 // Turn on the keyboard cues from now on. This is done when a keyboard action is detected
-void CMenuContainer::ShowKeyboardCues( void )
+void CMenuContainer::ShowKeyboardCues( bool alt )
 {
+	if (!GetSettingBool(L"EnableAccelerators"))
+		return;
+
+	if (GetSettingBool(L"AltAccelerators") && !alt)
+		return;
+
 	if (!s_bKeyboardCues)
 	{
 		s_bKeyboardCues=true;
@@ -5126,7 +5148,7 @@ LRESULT CMenuContainer::OnSysCommand( UINT uMsg, WPARAM wParam, LPARAM lParam, B
 	if ((wParam&0xFFF0)==SC_KEYMENU)
 	{
 		// stops Alt from activating the window menu
-		ShowKeyboardCues();
+		ShowKeyboardCues(true);
 		s_bOverrideFirstDown=false;
 	}
 	else
@@ -5469,7 +5491,7 @@ bool CMenuContainer::CanSelectItem( int index, bool bKeyboard )
 
 LRESULT CMenuContainer::OnKeyDown( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled )
 {
-	ShowKeyboardCues();
+	ShowKeyboardCues((HIWORD(lParam)&KF_ALTDOWN)!=0);
 	bool bOldOverride=s_bOverrideFirstDown;
 	s_bOverrideFirstDown=false;
 
@@ -6089,6 +6111,12 @@ LRESULT CMenuContainer::OnSysKeyDown( UINT uMsg, WPARAM wParam, LPARAM lParam, B
 
 LRESULT CMenuContainer::OnChar( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled )
 {
+	if (!GetSettingBool(L"EnableAccelerators"))
+		return TRUE;
+
+	if (GetSettingBool(L"AltAccelerators") && !(HIWORD(lParam) & KF_ALTDOWN))
+		return TRUE;
+
 	if (wParam>=0xD800 && wParam<=0xDBFF)
 		return TRUE; // don't support supplementary characters
 
@@ -7405,7 +7433,7 @@ static void CreateStartScreenFile( const wchar_t *fname )
 bool CMenuContainer::HasMoreResults( void )
 {
 	if (s_HasMoreResults==-1)
-		s_HasMoreResults=(GetSettingBool(L"SearchFiles") && HasSearchService())?1:0;
+		s_HasMoreResults=(GetSettingBool(L"MoreResults") && GetSettingBool(L"SearchFiles") && HasSearchService())?1:0;
 	return s_HasMoreResults!=0;
 }
 
@@ -7477,34 +7505,10 @@ RECT CMenuContainer::CalculateWorkArea( const RECT &taskbarRect )
 		}
 	}
 
-	//calculate offsets
-	int xOff = GetSettingInt(L"HorizontalMenuOffset");
-	int yOff = GetSettingInt(L"VerticalMenuOffset");
-	if (s_TaskBarEdge == ABE_BOTTOM)
-	{
-		if (xOff != 0)
-			rc.left += xOff;
-		if (yOff != 0)
-			rc.bottom += yOff;
-	}
-	else if (s_TaskBarEdge == ABE_TOP || s_TaskBarEdge == ABE_LEFT)
-	{
-		if (xOff != 0)
-			rc.left += xOff;
-		if (yOff != 0)
-			rc.top += yOff;
-	}
-	else
-	{
-		if (xOff != 0)
-			rc.right += xOff;
-		if (yOff != 0)
-			rc.top += yOff;
-	}
-
 	return rc;
 }
 
+// Calculates start menu position
 POINT CMenuContainer::CalculateCorner( void )
 {
 	RECT margin={0,0,0,0};
@@ -7513,19 +7517,22 @@ POINT CMenuContainer::CalculateCorner( void )
 
 	POINT corner;
 	if (m_Options&CONTAINER_LEFT)
-		corner.x=s_MainMenuLimits.left+margin.left;
+		corner.x=max(s_MainMenuLimits.left,s_StartRect.left)+margin.left;
 	else
-		corner.x=s_MainMenuLimits.right+margin.right;
+		corner.x=min(s_MainMenuLimits.right,s_StartRect.right)+margin.right;
 
 	if (m_Options&CONTAINER_TOP)
 	{
 		if (s_bBehindTaskbar)
-			corner.y=s_MainMenuLimits.top+margin.top;
+			corner.y=max(s_MainMenuLimits.top,s_StartRect.top)+margin.top;
 		else
-			corner.y=s_MainMenuLimits.top;
+			corner.y=max(s_MainMenuLimits.top,s_StartRect.top);
 	}
 	else
 		corner.y=s_MainMenuLimits.bottom+margin.bottom;
+
+	corner.x+=GetSettingInt(L"HorizontalMenuOffset");
+	corner.y+=GetSettingInt(L"VerticalMenuOffset");
 
 	return corner;
 }
@@ -7634,6 +7641,9 @@ HWND CMenuContainer::ToggleStartMenu( int taskbarId, bool bKeyboard, bool bAllPr
 	// initialize all settings
 	bool bErr=false;
 	HMONITOR initialMonitor=MonitorFromWindow(s_TaskBar,MONITOR_DEFAULTTONEAREST);
+	// note: GetTaskbarPosition properly identifies monitor in case of multi-monitor setup and automatic taskbar hiding
+	GetTaskbarPosition(s_TaskBar,NULL,&initialMonitor,NULL);
+
 	int dpi=CItemManager::GetDPI(true);
 	if (!CItemManager::GetDPIOverride() && GetWinVersion()>=WIN_VER_WIN81)
 	{
@@ -7699,7 +7709,6 @@ HWND CMenuContainer::ToggleStartMenu( int taskbarId, bool bKeyboard, bool bAllPr
 	s_bDisableHover=false;
 	s_bDragClosed=false;
 	s_bPendingSearchEnter=false;
-	s_bMoreResults=GetSettingBool(L"MoreResults");
 	InitTouchHelper();
 
 	bool bRemote=GetSystemMetrics(SM_REMOTESESSION)!=0;
@@ -8046,7 +8055,7 @@ HWND CMenuContainer::ToggleStartMenu( int taskbarId, bool bKeyboard, bool bAllPr
 
 	s_bNoDragDrop=!GetSettingBool(L"EnableDragDrop");
 	s_bNoContextMenu=!GetSettingBool(L"EnableContextMenu");
-	s_bKeyboardCues=bKeyboard;
+	s_bKeyboardCues=bKeyboard&&GetSettingBool(L"EnableAccelerators")&&!GetSettingBool(L"AltAccelerators");
 	s_RecentPrograms=(TRecentPrograms)GetSettingInt(L"RecentPrograms");
 	if (s_RecentPrograms!=RECENT_PROGRAMS_NONE)
 		LoadMRUShortcuts();
@@ -8213,7 +8222,7 @@ HWND CMenuContainer::ToggleStartMenu( int taskbarId, bool bKeyboard, bool bAllPr
 		s_UserPicture.Init(pStartMenu);
 	}
 	dummyRc.right++;
-	pStartMenu->SetWindowPos(NULL,&dummyRc,SWP_NOZORDER);
+	pStartMenu->SetWindowPos(NULL,&dummyRc,SWP_NOZORDER|SWP_NOACTIVATE);
 
 	memset(&s_StartRect,0,sizeof(s_StartRect));
 
@@ -8542,7 +8551,7 @@ HWND CMenuContainer::ToggleStartMenu( int taskbarId, bool bKeyboard, bool bAllPr
 	// reposition start menu
 	if (bTopMost || !s_bBehindTaskbar)
 		animFlags|=AW_TOPMOST;
-	pStartMenu->SetWindowPos((animFlags&AW_TOPMOST)?HWND_TOPMOST:HWND_TOP,corner.x,corner.y,0,0,(initialMonitor!=s_MenuMonitor && !bAllPrograms)?SWP_NOMOVE|SWP_NOSIZE:0);
+	pStartMenu->SetWindowPos((animFlags&AW_TOPMOST)?HWND_TOPMOST:HWND_TOP,corner.x,corner.y,0,0,((initialMonitor!=s_MenuMonitor && !bAllPrograms)?SWP_NOMOVE|SWP_NOSIZE:0)|SWP_NOACTIVATE);
 
 	pStartMenu->InitItems();
 	pStartMenu->m_MaxWidth=s_MainMenuLimits.right-s_MainMenuLimits.left;

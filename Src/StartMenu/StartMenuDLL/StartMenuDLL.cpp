@@ -47,7 +47,7 @@ static HWND g_Tooltip;
 static TOOLINFO g_StartButtonTool;
 static bool g_bHotkeyShift;
 static int g_HotkeyCSM, g_HotkeyWSM, g_HotkeyShiftID, g_HotkeyCSMID, g_HotkeyWSMID;
-static HHOOK g_ProgHook, g_StartHook, g_AppManagerHook, g_NewWindowHook, g_StartMenuHook;
+static HHOOK g_ProgHook, g_StartHook, g_StartMouseHook, g_AppManagerHook, g_NewWindowHook, g_StartMenuHook;
 static bool g_bAllProgramsTimer;
 static bool g_bInMenu;
 static DWORD g_LastClickTime;
@@ -402,6 +402,7 @@ static TaskbarInfo *FindTaskBarInfoBar( HWND bar )
 
 static LRESULT CALLBACK HookProgManThread( int code, WPARAM wParam, LPARAM lParam );
 static LRESULT CALLBACK HookDesktopThread( int code, WPARAM wParam, LPARAM lParam );
+static LRESULT CALLBACK HookDesktopThreadMouse(int code, WPARAM wParam, LPARAM lParam);
 
 static BOOL CALLBACK FindTooltipEnum( HWND hwnd, LPARAM lParam )
 {
@@ -602,6 +603,11 @@ UINT GetTaskbarPosition( HWND taskBar, MONITORINFO *pInfo, HMONITOR *pMonitor, R
 		SHAppBarMessage(ABM_GETTASKBARPOS,&appbar);
 		if (pRc)
 		{
+			if (RECT rc; GetWindowRgnBox(taskBar,&rc)!=ERROR)
+			{
+				MapWindowPoints(taskBar,NULL,(POINT*)&rc,2);
+				appbar.rc=rc;
+			}
 			*pRc=appbar.rc;
 			RECT rc;
 			GetWindowRect(taskBar,&rc);
@@ -616,12 +622,12 @@ UINT GetTaskbarPosition( HWND taskBar, MONITORINFO *pInfo, HMONITOR *pMonitor, R
 				if (pRc->right>rc.right) pRc->right=rc.right;
 			}
 		}
+		HMONITOR monitor=MonitorFromRect(&appbar.rc,MONITOR_DEFAULTTONEAREST);
+		if (pMonitor) *pMonitor=monitor;
 		if (pInfo)
 		{
 			pInfo->cbSize=sizeof(MONITORINFO);
-			HMONITOR monitor=MonitorFromRect(&appbar.rc,MONITOR_DEFAULTTONEAREST);
 			GetMonitorInfo(monitor,pInfo);
-			if (pMonitor) *pMonitor=monitor;
 		}
 		return appbar.uEdge;
 	}
@@ -671,21 +677,45 @@ UINT GetTaskbarPosition( HWND taskBar, MONITORINFO *pInfo, HMONITOR *pMonitor, R
 bool PointAroundStartButton( size_t taskbarId, const CPoint &pt )
 {
 	const TaskbarInfo *taskBar=GetTaskbarInfo(taskbarId);
-	if (!taskBar || !taskBar->startButton) return false;
-	RECT rc;
+	if (!taskBar || !(taskBar->startButton || taskBar->oldButton)) return false;
+	CRect rc;
 	GetWindowRect(taskBar->taskBar,&rc);
 	if (!PtInRect(&rc,pt))
 		return false;
 
-	UINT uEdge=GetTaskbarPosition(taskBar->taskBar,NULL,NULL,NULL);
+	bool rtl=GetWindowLongPtr(taskBar->taskBar,GWL_EXSTYLE)&WS_EX_LAYOUTRTL;
+
+	CRect rcStart;
+	if (taskBar->startButton)
+		GetWindowRect(taskBar->startButton,&rcStart);
+
+	CRect rcOld;
+	if (taskBar->oldButton)
+	{
+		GetWindowRect(taskBar->oldButton,&rcOld);
+
+		if (IsWin11())
+		{
+			// on Win11 the Start button rectangle is a bit smaller that actual XAML active area
+			// lets make it a bit wider to avoid accidental original Start menu triggers
+			const int adjust=ScaleForDpi(taskBar->taskBar,1);
+			if (rtl)
+				rcOld.left-=adjust;
+			else
+				rcOld.right+=adjust;
+		}
+	}
+
+	rc.UnionRect(&rcStart,&rcOld);
+
 	// check if the point is inside the start button rect
-	GetWindowRect(taskBar->startButton,&rc);
+	UINT uEdge=GetTaskbarPosition(taskBar->taskBar,NULL,NULL,NULL);
 	if (uEdge==ABE_LEFT || uEdge==ABE_RIGHT)
-		return pt.y<rc.bottom;
-	else if (GetWindowLongPtr(taskBar->taskBar,GWL_EXSTYLE)&WS_EX_LAYOUTRTL)
-		return pt.x>rc.left;
+		return pt.y>=rc.top && pt.y<rc.bottom;
+	else if (rtl)
+		return pt.x>rc.left && pt.x<=rc.right;
 	else
-		return pt.x<rc.right;
+		return pt.x>=rc.left && pt.x<rc.right;
 }
 
 // declare few interfaces so we don't need the Win8 SDK
@@ -1186,15 +1216,169 @@ void EnableHotkeys( THotkeys enable )
 	}
 }
 
+bool IsTouchTaskbar(void)
+{
+	if (!IsWin11())
+		return false;
+
+	CRegKey regKey;
+	if (regKey.Open(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer") != ERROR_SUCCESS)
+		return false;
+
+	DWORD val;
+	return regKey.QueryDWORDValue(L"TabletPostureTaskbar", val) == ERROR_SUCCESS && val;
+}
+
+static void UpdateStartButtonPosition(const TaskbarInfo* taskBar, const WINDOWPOS* pPos)
+{
+	if (IsStartButtonSmallIcons(taskBar->taskbarId) != IsTaskbarSmallIcons())
+		RecreateStartButton(taskBar->taskbarId);
+
+	RECT rcTask;
+	GetWindowRect(taskBar->taskBar, &rcTask);
+	if (IsTouchTaskbar())
+	{
+		if (RECT rc; GetWindowRgnBox(taskBar->taskBar, &rc) != ERROR)
+		{
+			MapWindowPoints(taskBar->taskBar, NULL, (POINT*)&rc, 2);
+			rcTask = rc;
+		}
+	}
+	MONITORINFO info;
+	UINT uEdge = GetTaskbarPosition(taskBar->taskBar, &info, NULL, NULL);
+	DWORD buttonFlags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSIZE;
+	if (IsWindowVisible(taskBar->taskBar))
+		buttonFlags |= SWP_SHOWWINDOW;
+	else
+		buttonFlags |= SWP_HIDEWINDOW;
+
+	APPBARDATA appbar = { sizeof(appbar) };
+	if (SHAppBarMessage(ABM_GETSTATE, &appbar) & ABS_AUTOHIDE)
+	{
+		bool bHide = false;
+		if (uEdge == ABE_LEFT)
+			bHide = (rcTask.right < info.rcMonitor.left + 5);
+		else if (uEdge == ABE_RIGHT)
+			bHide = (rcTask.left > info.rcMonitor.right - 5);
+		else if (uEdge == ABE_TOP)
+			bHide = (rcTask.bottom < info.rcMonitor.top + 5);
+		else
+			bHide = (rcTask.top > info.rcMonitor.bottom - 5);
+		if (bHide)
+			buttonFlags = (buttonFlags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
+	}
+	if (uEdge == ABE_TOP || uEdge == ABE_BOTTOM)
+	{
+		if (rcTask.left < info.rcMonitor.left) rcTask.left = info.rcMonitor.left;
+		if (rcTask.right > info.rcMonitor.right) rcTask.right = info.rcMonitor.right;
+	}
+	else
+	{
+		if (rcTask.top < info.rcMonitor.top) rcTask.top = info.rcMonitor.top;
+	}
+
+	HWND zPos = NULL;
+	if (pPos->flags & SWP_NOZORDER)
+		buttonFlags |= SWP_NOZORDER;
+	else
+	{
+		zPos = pPos->hwndInsertAfter;
+		if (zPos == HWND_TOP && !(GetWindowLongPtr(taskBar->startButton, GWL_EXSTYLE) & WS_EX_TOPMOST))
+			zPos = HWND_TOPMOST;
+		if (zPos == HWND_TOPMOST && !(GetWindowLongPtr(taskBar->taskBar, GWL_EXSTYLE) & WS_EX_TOPMOST))
+			zPos = HWND_TOP;
+		if (zPos == HWND_BOTTOM)
+			buttonFlags |= SWP_NOZORDER;
+		if (zPos == taskBar->startButton)
+			buttonFlags |= SWP_NOZORDER;
+	}
+
+	if (!IsStartButtonSmallIcons(taskBar->taskbarId))
+	{
+		bool bClassic;
+		if (GetWinVersion() < WIN_VER_WIN8)
+			bClassic = !IsAppThemed();
+		else
+		{
+			HIGHCONTRAST contrast = { sizeof(contrast) };
+			bClassic = (SystemParametersInfo(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) && (contrast.dwFlags & HCF_HIGHCONTRASTON));
+		}
+		if (!bClassic)
+		{
+			if (uEdge == ABE_TOP)
+				OffsetRect(&rcTask, 0, -1);
+			else if (uEdge == ABE_BOTTOM)
+				OffsetRect(&rcTask, 0, 1);
+		}
+	}
+
+	RECT rcOldButton;
+	if (taskBar->oldButton)
+		GetWindowRect(taskBar->oldButton, &rcOldButton);
+
+	int x, y;
+	if (uEdge == ABE_LEFT || uEdge == ABE_RIGHT)
+	{
+		if (GetSettingInt(L"StartButtonType") != START_BUTTON_CUSTOM || !GetSettingBool(L"StartButtonAlign"))
+			x = (rcTask.left + rcTask.right - taskBar->startButtonSize.cx) / 2;
+		else if (uEdge == ABE_LEFT)
+			x = rcTask.left;
+		else
+			x = rcTask.right - taskBar->startButtonSize.cx;
+		y = taskBar->oldButton ? rcOldButton.top : rcTask.top;
+	}
+	else
+	{
+		if (GetWindowLongPtr(taskBar->rebar, GWL_EXSTYLE) & WS_EX_LAYOUTRTL)
+			x = (taskBar->oldButton ? rcOldButton.right : rcTask.right) - taskBar->startButtonSize.cx;
+		else
+			x = taskBar->oldButton ? rcOldButton.left : rcTask.left;
+		if (GetSettingInt(L"StartButtonType") != START_BUTTON_CUSTOM || !GetSettingBool(L"StartButtonAlign"))
+			y = (rcTask.top + rcTask.bottom - taskBar->startButtonSize.cy) / 2;
+		else if (uEdge == ABE_TOP)
+			y = rcTask.top;
+		else
+			y = rcTask.bottom - taskBar->startButtonSize.cy;
+
+		// Start button on Win11 is a bit shifted to the right
+		// We will shift our Aero button to cover original button
+		if (IsWin11() && (x == info.rcMonitor.left) && (GetStartButtonType() == START_BUTTON_AERO))
+			x += ScaleForDpi(taskBar->taskBar, 6);
+	}
+
+	RECT rcButton = { x, y, x + taskBar->startButtonSize.cx, y + taskBar->startButtonSize.cy };
+	RECT rc;
+	IntersectRect(&rc, &rcButton, &info.rcMonitor);
+	HRGN rgn = CreateRectRgn(rc.left - x, rc.top - y, rc.right - x, rc.bottom - y);
+	if (!SetWindowRgn(taskBar->startButton, rgn, FALSE))
+	{
+		AddTrackedObject(rgn);
+		DeleteObject(rgn);
+	}
+
+	SetWindowPos(taskBar->startButton, zPos, x, y, 0, 0, buttonFlags);
+
+	if (buttonFlags & SWP_SHOWWINDOW)
+		UpdateStartButton(taskBar->taskbarId);
+}
+
 static LRESULT CALLBACK SubclassWin81StartButton( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData )
 {
+	TaskbarInfo* taskBar = GetTaskbarInfo((int)dwRefData);
+
 	if (uMsg==WM_WINDOWPOSCHANGING)
 	{
 		// keep the original start button hidden at all times
-		const TaskbarInfo *taskBar=GetTaskbarInfo((int)dwRefData);
 		if (taskBar && taskBar->bHideButton)
 		{
 			((WINDOWPOS*)lParam)->flags&=~SWP_SHOWWINDOW;
+		}
+	}
+	if (uMsg==WM_WINDOWPOSCHANGED)
+	{
+		if (taskBar && taskBar->bReplaceButton)
+		{
+			UpdateStartButtonPosition(taskBar,(WINDOWPOS*)lParam);
 		}
 	}
 	if (uMsg==WM_SIZE)
@@ -1203,7 +1387,6 @@ static LRESULT CALLBACK SubclassWin81StartButton( HWND hWnd, UINT uMsg, WPARAM w
 		GetWindowRect(hWnd,&rc);
 		rc.right-=rc.left;
 		rc.bottom-=rc.top;
-		TaskbarInfo *taskBar=GetTaskbarInfo((int)dwRefData);
 		if (taskBar && (taskBar->oldButtonSize.cx!=rc.right || taskBar->oldButtonSize.cy!=rc.bottom))
 		{
 			taskBar->oldButtonSize.cx=rc.right;
@@ -1467,6 +1650,15 @@ static void ComputeTaskbarColors( int *data )
 
 static void ShowWinX( void )
 {
+	if (IsWin11())
+	{
+		HWND hwnd=FindWindowEx(NULL,NULL,L"Shell_TrayWnd",NULL);
+		if (hwnd)
+			PostMessage(hwnd,WM_HOTKEY,590,MAKELPARAM(MOD_WIN,'X'));
+
+		return;
+	}
+
 	if (GetWinVersion()>=WIN_VER_WIN10)
 	{
 		CComPtr<IUnknown> pImmersiveShell;
@@ -1651,116 +1843,7 @@ static LRESULT CALLBACK SubclassTaskBarProc( HWND hWnd, UINT uMsg, WPARAM wParam
 	{
 		if (taskBar->bReplaceButton)
 		{
-			if (IsStartButtonSmallIcons(taskBar->taskbarId)!=IsTaskbarSmallIcons())
-				RecreateStartButton((int)dwRefData);
-
-			WINDOWPOS *pPos=(WINDOWPOS*)lParam;
-			RECT rcTask;
-			GetWindowRect(hWnd,&rcTask);
-			MONITORINFO info;
-			UINT uEdge=GetTaskbarPosition(hWnd,&info,NULL,NULL);
-			DWORD buttonFlags=SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_NOSIZE;
-			if (IsWindowVisible(taskBar->taskBar))
-				buttonFlags|=SWP_SHOWWINDOW;
-			else
-				buttonFlags|=SWP_HIDEWINDOW;
-
-			APPBARDATA appbar={sizeof(appbar)};
-			if (SHAppBarMessage(ABM_GETSTATE,&appbar)&ABS_AUTOHIDE)
-			{
-				bool bHide=false;
-				if (uEdge==ABE_LEFT)
-					bHide=(rcTask.right<info.rcMonitor.left+5);
-				else if (uEdge==ABE_RIGHT)
-					bHide=(rcTask.left>info.rcMonitor.right-5);
-				else if (uEdge==ABE_TOP)
-					bHide=(rcTask.bottom<info.rcMonitor.top+5);
-				else
-					bHide=(rcTask.top>info.rcMonitor.bottom-5);
-				if (bHide)
-					buttonFlags=(buttonFlags&~SWP_SHOWWINDOW)|SWP_HIDEWINDOW;
-			}
-			if (uEdge==ABE_TOP || uEdge==ABE_BOTTOM)
-			{
-				if (rcTask.left<info.rcMonitor.left) rcTask.left=info.rcMonitor.left;
-				if (rcTask.right>info.rcMonitor.right) rcTask.right=info.rcMonitor.right;
-			}
-			else
-			{
-				if (rcTask.top<info.rcMonitor.top) rcTask.top=info.rcMonitor.top;
-			}
-			if (!IsStartButtonSmallIcons(taskBar->taskbarId))
-			{
-				bool bClassic;
-				if (GetWinVersion()<WIN_VER_WIN8)
-					bClassic=!IsAppThemed();
-				else
-				{
-					HIGHCONTRAST contrast={sizeof(contrast)};
-					bClassic=(SystemParametersInfo(SPI_GETHIGHCONTRAST,sizeof(contrast),&contrast,0) && (contrast.dwFlags&HCF_HIGHCONTRASTON));
-				}
-				if (!bClassic)
-				{
-					if (uEdge==ABE_TOP)
-						OffsetRect(&rcTask,0,-1);
-					else if (uEdge==ABE_BOTTOM)
-						OffsetRect(&rcTask,0,1);
-				}
-			}
-			HWND zPos=NULL;
-			if (pPos->flags&SWP_NOZORDER)
-				buttonFlags|=SWP_NOZORDER;
-			else
-			{
-				zPos=pPos->hwndInsertAfter;
-				if (zPos==HWND_TOP && !(GetWindowLongPtr(taskBar->startButton,GWL_EXSTYLE)&WS_EX_TOPMOST))
-					zPos=HWND_TOPMOST;
-				if (zPos==HWND_TOPMOST && !(GetWindowLongPtr(hWnd,GWL_EXSTYLE)&WS_EX_TOPMOST))
-					zPos=HWND_TOP;
-				if (zPos==HWND_BOTTOM)
-					buttonFlags|=SWP_NOZORDER;
-				if (zPos==taskBar->startButton)
-					buttonFlags|=SWP_NOZORDER;
-			}
-
-			int x, y;
-			if (uEdge==ABE_LEFT || uEdge==ABE_RIGHT)
-			{
-				if (GetSettingInt(L"StartButtonType")!=START_BUTTON_CUSTOM || !GetSettingBool(L"StartButtonAlign"))
-					x=(rcTask.left+rcTask.right-taskBar->startButtonSize.cx)/2;
-				else if (uEdge==ABE_LEFT)
-					x=rcTask.left;
-				else
-					x=rcTask.right-taskBar->startButtonSize.cx;
-				y=rcTask.top;
-			}
-			else
-			{
-				if (GetWindowLongPtr(taskBar->rebar,GWL_EXSTYLE)&WS_EX_LAYOUTRTL)
-					x=rcTask.right-taskBar->startButtonSize.cx;
-				else
-					x=rcTask.left;
-				if (GetSettingInt(L"StartButtonType")!=START_BUTTON_CUSTOM || !GetSettingBool(L"StartButtonAlign"))
-					y=(rcTask.top+rcTask.bottom-taskBar->startButtonSize.cy)/2;
-				else if (uEdge==ABE_TOP)
-					y=rcTask.top;
-				else
-					y=rcTask.bottom-taskBar->startButtonSize.cy;
-			}
-			RECT rcButton={x,y,x+taskBar->startButtonSize.cx,y+taskBar->startButtonSize.cy};
-			RECT rc;
-			IntersectRect(&rc,&rcButton,&info.rcMonitor);
-			HRGN rgn=CreateRectRgn(rc.left-x,rc.top-y,rc.right-x,rc.bottom-y);
-			if (!SetWindowRgn(taskBar->startButton,rgn,FALSE))
-			{
-				AddTrackedObject(rgn);
-				DeleteObject(rgn);
-			}
-			g_bAllowMoveButton=true;
-			SetWindowPos(taskBar->startButton,zPos,x,y,0,0,buttonFlags);
-			g_bAllowMoveButton=false;
-			if (buttonFlags&SWP_SHOWWINDOW)
-				UpdateStartButton(taskBar->taskbarId);
+			UpdateStartButtonPosition(taskBar,(WINDOWPOS*)lParam);
 		}
 		if (taskBar->oldButton && GetWinVersion()<WIN_VER_WIN10)
 		{
@@ -1982,6 +2065,21 @@ static LRESULT CALLBACK SubclassTaskBarProc( HWND hWnd, UINT uMsg, WPARAM wParam
 
 static LRESULT CALLBACK SubclassTaskListProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData )
 {
+	if (uMsg==WM_PAINT && g_TaskbarTexture)
+	{
+		wchar_t name[100];
+		GetClassName(hWnd,name,_countof(name));
+		if (_wcsicmp(name,L"MSTaskSwWClass")==0)
+		{
+			// draw taskbar background (behind task list)
+			PAINTSTRUCT ps;
+			HDC hdc=BeginPaint(hWnd,&ps);
+			DrawThemeParentBackground(hWnd,hdc,NULL);
+			EndPaint(hWnd,&ps);
+			return 0;
+		}
+	}
+
 	if (uMsg==WM_PAINT || uMsg==WM_PRINT || uMsg==WM_PRINTCLIENT)
 	{
 		g_CurrentTaskList=hWnd;
@@ -2782,6 +2880,34 @@ static BOOL WINAPI SetWindowCompositionAttribute2( HWND hwnd, WINCOMPATTRDATA *p
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// hooks for preventing shell hotkeys registration on Win11
+
+using ShellRegisterHotKey_t = BOOL(WINAPI*)(HWND, int, UINT, UINT, HWND);
+
+static IatHookData* g_ShellRegisterHotKeyHook;
+static ShellRegisterHotKey_t g_ShellRegisterHotKey;
+
+static BOOL WINAPI ShellRegisterHotKeyHook(HWND hWnd, int id, UINT fsModifiers, UINT vk, HWND hWndTarget)
+{
+	// Win key
+	if (fsModifiers == MOD_WIN && vk == 0)
+		return FALSE;
+
+	// Ctrl+Esc
+	if (fsModifiers == MOD_CONTROL && vk == VK_ESCAPE)
+		return FALSE;
+
+	return g_ShellRegisterHotKey(hWnd, id, fsModifiers, vk, hWndTarget);
+}
+
+// one-time APC function to unregister shell hotkeys
+void NTAPI DisableShellHotkeysFunc(ULONG_PTR Parameter)
+{
+	UnregisterHotKey(NULL, 1);
+	UnregisterHotKey(NULL, 2);
+}
+
+///////////////////////////////////////////////////////////////////////////////
 
 static void OpenCortana( void )
 {
@@ -2791,6 +2917,12 @@ static void OpenCortana( void )
 
 static void InitStartMenuDLL( void )
 {
+	static bool initCalled = false;
+	if (initCalled)
+		return;
+
+	initCalled = true;
+
 	LogToFile(STARTUP_LOG, L"StartMenu DLL: InitStartMenuDLL");
 	WaitDllInitThread();
 
@@ -2823,6 +2955,10 @@ static void InitStartMenuDLL( void )
 
 	if (GetSettingBool(L"CustomTaskbar"))
 	{
+		auto module=GetModuleHandle(L"taskbar.dll");
+		if (!module)
+			module=GetModuleHandle(NULL);
+
 		if (GetWinVersion()>=WIN_VER_WIN10)
 		{
 			HMODULE shlwapi=GetModuleHandle(L"shlwapi.dll");
@@ -2831,12 +2967,14 @@ static void InitStartMenuDLL( void )
 				g_SHFillRectClr=(tSHFillRectClr)GetProcAddress(shlwapi,MAKEINTRESOURCEA(197));
 				if (g_SHFillRectClr)
 				{
-					g_SHFillRectClrHook=SetIatHook(GetModuleHandle(NULL),"shlwapi.dll",MAKEINTRESOURCEA(197),SHFillRectClr2);
+					g_SHFillRectClrHook=SetIatHook(module,"shlwapi.dll",MAKEINTRESOURCEA(197),SHFillRectClr2);
 					if (!g_SHFillRectClrHook)
-						g_SHFillRectClrHook=SetIatHook(GetModuleHandle(NULL),"api-ms-win-shlwapi-winrt-storage-l1-1-1.dll",MAKEINTRESOURCEA(197),SHFillRectClr2);
+						g_SHFillRectClrHook=SetIatHook(module,"api-ms-win-shlwapi-winrt-storage-l1-1-1.dll",MAKEINTRESOURCEA(197),SHFillRectClr2);
 				}
 			}
-			g_StretchDIBitsHook=SetIatHook(GetModuleHandle(NULL),"gdi32.dll","StretchDIBits",StretchDIBits2);
+			g_StretchDIBitsHook=SetIatHook(module,"gdi32.dll","StretchDIBits",StretchDIBits2);
+			if (!g_StretchDIBitsHook)
+				g_StretchDIBitsHook=SetIatHook(module,"ext-ms-win-gdi-draw-l1-1-0.dll","StretchDIBits",StretchDIBits2);
 		}
 
 		{
@@ -2846,12 +2984,12 @@ static void InitStartMenuDLL( void )
 		}
 
 		if (GetWinVersion()<=WIN_VER_WIN81)
-			g_DrawThemeBackgroundHook=SetIatHook(GetModuleHandle(NULL),"uxtheme.dll","DrawThemeBackground",DrawThemeBackground2);
-		g_DrawThemeTextHook=SetIatHook(GetModuleHandle(NULL),"uxtheme.dll","DrawThemeText",DrawThemeText2);
-		g_DrawThemeTextExHook=SetIatHook(GetModuleHandle(NULL),"uxtheme.dll","DrawThemeTextEx",DrawThemeTextEx2);
+			g_DrawThemeBackgroundHook=SetIatHook(module,"uxtheme.dll","DrawThemeBackground",DrawThemeBackground2);
+		g_DrawThemeTextHook=SetIatHook(module,"uxtheme.dll","DrawThemeText",DrawThemeText2);
+		g_DrawThemeTextExHook=SetIatHook(module,"uxtheme.dll","DrawThemeTextEx",DrawThemeTextEx2);
 		g_DrawThemeTextCtlHook=SetIatHook(GetModuleHandle(L"comctl32.dll"),"uxtheme.dll","DrawThemeText",DrawThemeText2);
 		if (GetWinVersion()>=WIN_VER_WIN10)
-			g_SetWindowCompositionAttributeHook=SetIatHook(GetModuleHandle(NULL),"user32.dll","SetWindowCompositionAttribute",SetWindowCompositionAttribute2);
+			g_SetWindowCompositionAttributeHook=SetIatHook(module,"user32.dll","SetWindowCompositionAttribute",SetWindowCompositionAttribute2);
 	}
 
 	g_TaskbarThreadId=GetCurrentThreadId();
@@ -2872,6 +3010,34 @@ static void InitStartMenuDLL( void )
 	DWORD progThread=GetWindowThreadProcessId(g_ProgWin,NULL);
 	g_ProgHook=SetWindowsHookEx(WH_GETMESSAGE,HookProgManThread,NULL,progThread);
 	g_StartHook=SetWindowsHookEx(WH_GETMESSAGE,HookDesktopThread,NULL,GetCurrentThreadId());
+	if (IsWin11())
+	{
+		g_StartMouseHook=SetWindowsHookEx(WH_MOUSE,HookDesktopThreadMouse,NULL,GetCurrentThreadId());
+
+		// hook ShellRegisterHotKey to prevent twinui.dll to install shell hotkeys (Win, Ctrl+Esc)
+		// without these hotkeys there is standard WM_SYSCOMMAND+SC_TASKLIST sent when start menu is invoked by keyboard shortcut
+		g_ShellRegisterHotKey = (ShellRegisterHotKey_t)GetProcAddress(GetModuleHandle(L"user32.dll"), MAKEINTRESOURCEA(2671));
+		auto twinui = GetModuleHandle(L"twinui.dll");
+
+		if (g_ShellRegisterHotKey && twinui)
+		{
+			g_ShellRegisterHotKeyHook = SetIatHook(twinui, "user32.dll" ,MAKEINTRESOURCEA(2671), ShellRegisterHotKeyHook);
+
+			// unregister shell hotkeys as they may be registered already
+			// this has to be done from context of thread that registered them
+			auto hwnd = FindWindow(L"ApplicationManager_ImmersiveShellWindow", NULL);
+			if (hwnd)
+			{
+				auto thread = OpenThread(THREAD_SET_CONTEXT, FALSE, GetWindowThreadProcessId(hwnd, NULL));
+				if (thread)
+				{
+					QueueUserAPC(DisableShellHotkeysFunc, thread, 0);
+					CloseHandle(thread);
+				}
+			}
+		}
+	}
+
 	HWND hwnd=FindWindow(L"OpenShellMenu.CStartHookWindow",L"StartHookWindow");
 	LoadLibrary(L"StartMenuDLL.dll"); // keep the DLL from unloading
 	if (hwnd) PostMessage(hwnd,WM_CLEAR,0,0); // tell the exe to unhook this hook
@@ -2887,9 +3053,18 @@ static void InitStartMenuDLL( void )
 	if (taskBar.rebar)
 	{
 		SetWindowSubclass(taskBar.rebar,SubclassRebarProc,'CLSH',taskbarId);
+		// TaskBand window
 		HWND hwnd=FindWindowEx(taskBar.rebar,NULL,L"MSTaskSwWClass",NULL);
 		if (hwnd)
-			taskBar.taskList=FindWindowEx(hwnd,NULL,L"MSTaskListWClass",NULL);
+		{
+			taskBar.taskList=hwnd;
+			// TaskList window
+			// it has to be visible, otherwise it won't receive WM_PAINT that we need to intercept
+			// in such case we will intercept parent instead
+			hwnd=FindWindowEx(hwnd,NULL,L"MSTaskListWClass",NULL);
+			if (hwnd&&IsWindowVisible(hwnd))
+				taskBar.taskList=hwnd;
+		}
 		if (taskBar.taskList)
 			SetWindowSubclass(taskBar.taskList,SubclassTaskListProc,'CLSH',taskbarId);
 	}
@@ -2931,6 +3106,9 @@ static void InitStartMenuDLL( void )
 			taskBar.chevron=FindWindowEx(tray,NULL,L"Button",NULL);
 		if (taskBar.chevron)
 			SetWindowSubclass(taskBar.chevron,SubclassTrayChevronProc,'CLSH',taskBar.taskbarId);
+		taskBar.news=FindWindowEx(g_TaskBar,NULL,L"DynamicContent2",NULL);
+		if (taskBar.news)
+			SetWindowSubclass(taskBar.news,SubclassTrayChevronProc,'CLSH',taskBar.taskbarId);
 	}
 
 	HandleTaskbarParts(taskBar,true);
@@ -2993,39 +3171,6 @@ static void RecreateStartButton( size_t taskbarId )
 			continue;
 		if (taskBar.bRecreatingButton)
 			continue;
-		RECT rcTask;
-		GetWindowRect(taskBar.taskBar,&rcTask);
-		RECT rcTask2=rcTask;
-		MONITORINFO info;
-		UINT uEdge=GetTaskbarPosition(taskBar.taskBar,&info,NULL,NULL);
-		if (uEdge==ABE_TOP || uEdge==ABE_BOTTOM)
-		{
-			if (rcTask2.left<info.rcMonitor.left) rcTask2.left=info.rcMonitor.left;
-			if (rcTask2.right>info.rcMonitor.right) rcTask2.right=info.rcMonitor.right;
-		}
-		else
-		{
-			if (rcTask2.top<info.rcMonitor.top) rcTask2.top=info.rcMonitor.top;
-		}
-
-		if (!IsTaskbarSmallIcons())
-		{
-			bool bClassic;
-			if (GetWinVersion()<WIN_VER_WIN8)
-				bClassic=!IsAppThemed();
-			else
-			{
-				HIGHCONTRAST contrast={sizeof(contrast)};
-				bClassic=(SystemParametersInfo(SPI_GETHIGHCONTRAST,sizeof(contrast),&contrast,0) && (contrast.dwFlags&HCF_HIGHCONTRASTON));
-			}
-			if (!bClassic)
-			{
-				if (uEdge==ABE_TOP)
-					OffsetRect(&rcTask2,0,-1);
-				else if (uEdge==ABE_BOTTOM)
-					OffsetRect(&rcTask2,0,1);
-			}
-		}
 
 		taskBar.bRecreatingButton=true;
 		{
@@ -3034,7 +3179,7 @@ static void RecreateStartButton( size_t taskbarId )
 				RevokeDragDrop(taskBar.startButton);
 				DestroyStartButton(taskBar.taskbarId);
 			}
-			taskBar.startButton=CreateStartButton(taskBar.taskbarId,taskBar.taskBar,taskBar.rebar,rcTask2);
+			taskBar.startButton=CreateStartButton(taskBar.taskbarId,taskBar.taskBar,taskBar.rebar);
 			CStartMenuTarget *pNewTarget=new CStartMenuTarget(taskBar.taskbarId);
 			RegisterDragDrop(taskBar.startButton,pNewTarget);
 			pNewTarget->Release();
@@ -3050,7 +3195,18 @@ static void RecreateStartButton( size_t taskbarId )
 			taskBar.oldButtonSize.cy=rc.bottom-rc.top;
 		}
 
+		RECT rcTask;
+		GetWindowRect(taskBar.taskBar,&rcTask);
 		PostMessage(taskBar.taskBar,WM_SIZE,SIZE_RESTORED,MAKELONG(rcTask.right-rcTask.left,rcTask.bottom-rcTask.top));
+		if (taskBar.taskBar==g_TaskBar)
+		{
+			for (auto btn : taskBar.trayButtons)
+			{
+				RECT rc;
+				GetWindowRect(btn,&rc);
+				SetWindowPos(btn,HWND_TOP,rc.left,rc.top,0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOZORDER);
+			}
+		}
 	}
 }
 
@@ -3085,6 +3241,8 @@ static void CleanStartMenuDLL( void )
 	g_DrawThemeTextCtlHook=NULL;
 	ClearIatHook(g_SetWindowCompositionAttributeHook);
 	g_SetWindowCompositionAttributeHook=NULL;
+	ClearIatHook(g_ShellRegisterHotKeyHook);
+	g_ShellRegisterHotKeyHook=NULL;
 
 	CloseManagers(false);
 	ClearIatHooks();
@@ -3099,6 +3257,8 @@ static void CleanStartMenuDLL( void )
 	HWND hwnd=FindWindow(L"OpenShellMenu.CStartHookWindow",L"StartHookWindow");
 	UnhookWindowsHookEx(g_ProgHook);
 	UnhookWindowsHookEx(g_StartHook);
+	if (g_StartMouseHook) UnhookWindowsHookEx(g_StartMouseHook);
+	g_StartMouseHook=NULL;
 	if (g_AppManagerHook) UnhookWindowsHookEx(g_AppManagerHook);
 	g_AppManagerHook=NULL;
 	if (g_NewWindowHook) UnhookWindowsHookEx(g_NewWindowHook);
@@ -3120,7 +3280,8 @@ static void CleanStartMenuDLL( void )
 		if (it->second.oldButton)
 		{
 			RemoveWindowSubclass(it->second.oldButton,SubclassWin81StartButton,'CLSH');
-			SetWindowPos(it->second.oldButton,NULL,0,0,0,0,SWP_NOSIZE|SWP_NOZORDER);
+			if (GetWinVersion()<WIN_VER_WIN10 && GetTaskbarPosition(it->second.taskBar,NULL,NULL,NULL)==ABE_BOTTOM)
+				SetWindowPos(it->second.oldButton,NULL,0,0,0,0,SWP_NOSIZE|SWP_NOZORDER);
 			RevokeDragDrop(it->second.oldButton);
 			if (it->second.pOriginalTarget)
 				RegisterDragDrop(it->second.oldButton,it->second.pOriginalTarget);
@@ -3137,6 +3298,8 @@ if (!g_bTrimHooks)
 		}
 		if (it->second.chevron)
 			RemoveWindowSubclass(it->second.chevron,SubclassTrayChevronProc,'CLSH');
+		if (it->second.news)
+			RemoveWindowSubclass(it->second.news,SubclassTrayChevronProc,'CLSH');
 		if (it->second.desktop)
 			RemoveWindowSubclass(it->second.desktop,SubclassDesktopButtonProc,'CLSH');
 		if (it->second.bTimer)
@@ -3381,6 +3544,35 @@ static LRESULT CALLBACK HookProgManThread( int code, WPARAM wParam, LPARAM lPara
 		}
 	}
 	return CallNextHookEx(NULL,code,wParam,lParam);
+}
+
+// WH_MOUSE hook for taskbar thread (Win11+)
+static LRESULT CALLBACK HookDesktopThreadMouse(int code, WPARAM wParam, LPARAM lParam)
+{
+	if (code == HC_ACTION)
+	{
+		// we need to steal mouse messages that are issues in start button area
+		// so that they won't get to XAML framework that is handling original start button
+		auto info = (const MOUSEHOOKSTRUCT*)lParam;
+		{
+			auto taskBar = FindTaskBarInfoButton(info->hwnd); // click on start button
+			if (!taskBar)
+			{
+				taskBar = FindTaskBarInfoBar(GetAncestor(info->hwnd, GA_ROOT)); // click on taskbar
+				if (taskBar && !PointAroundStartButton(taskBar->taskbarId))
+					taskBar = NULL;
+			}
+
+			if (taskBar && (info->hwnd != taskBar->startButton) && taskBar->oldButton)
+			{
+				// steal messages from other than our custom button window
+				PostMessage(taskBar->oldButton, (UINT)wParam, 0, MAKELPARAM(info->pt.x, info->pt.y));
+				return 1;
+			}
+		}
+	}
+
+	return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
 // WH_GETMESSAGE hook for the taskbar thread
@@ -3861,9 +4053,13 @@ if (!g_bTrimHooks)
 
 					// right-click on the start button - open the context menu (Settings, Help, Exit)
 					HMENU menu=CreatePopupMenu();
-					CString title=LoadStringEx(IDS_MENU_TITLE);
-					if (!title.IsEmpty())
+					CString titleFmt=LoadStringEx(IDS_MENU_TITLE);
+					if (!titleFmt.IsEmpty())
 					{
+						CString title;
+						DWORD ver=GetVersionEx(g_Instance);
+						title.Format(titleFmt,ver>>24,(ver>>16)&0xFF,ver&0xFFFF);
+
 						AppendMenu(menu,MF_STRING,0,title);
 						EnableMenuItem(menu,0,MF_BYPOSITION|MF_DISABLED);
 						SetMenuDefaultItem(menu,0,TRUE);

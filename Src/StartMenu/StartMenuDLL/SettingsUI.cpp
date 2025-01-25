@@ -30,6 +30,19 @@ const int DEFAULT_TASK_OPACITY10=85; // 85%
 
 ///////////////////////////////////////////////////////////////////////////////
 
+CString RgbToBgr(const wchar_t* str)
+{
+	CString retval;
+	retval.Format(L"%06X", RgbToBgr(ParseColor(str)));
+
+	return retval;
+}
+
+CString BgrToRgb(const wchar_t* str)
+{
+	return RgbToBgr(str);
+}
+
 class CSkinSettingsDlg: public CResizeableDlg<CSkinSettingsDlg>
 {
 public:
@@ -422,7 +435,7 @@ void CSkinSettingsDlg::UpdateSkinSettings( void )
 			if (!option.bEnabled || bLocked)
 				image|=SETTING_STATE_DISABLED;
 			if (option.bValue && option.type>SKIN_OPTION_BOOL)
-				Sprintf(text,_countof(text),L"%s: %s",option.label,option.sValue);
+				Sprintf(text,_countof(text),L"%s: %s",option.label,(option.type==SKIN_OPTION_COLOR)?BgrToRgb(option.sValue):option.sValue);
 			else
 				Sprintf(text,_countof(text),L"%s",option.label);
 
@@ -482,9 +495,7 @@ LRESULT CSkinSettingsDlg::OnCustomDraw( int idCtrl, LPNMHDR pnmh, BOOL& bHandled
 			if (TreeView_GetItemRect(m_Tree,(HTREEITEM)pDraw->nmcd.dwItemSpec,&rc,TRUE))
 			{
 				const wchar_t *str=m_CurrentSkin.Options[pDraw->nmcd.lItemlParam].sValue;
-				wchar_t *end;
-				COLORREF color=wcstoul(str,&end,16);
-				SetDCBrushColor(pDraw->nmcd.hdc,color&0xFFFFFF);
+				SetDCBrushColor(pDraw->nmcd.hdc,ParseColor(str));
 				SelectObject(pDraw->nmcd.hdc,GetStockObject(DC_BRUSH));
 				SelectObject(pDraw->nmcd.hdc,GetStockObject(BLACK_PEN));
 				Rectangle(pDraw->nmcd.hdc,rc.right,rc.top,rc.right+rc.bottom-rc.top,rc.bottom-1);
@@ -690,15 +701,14 @@ LRESULT CSkinSettingsDlg::OnBrowse( WORD wNotifyCode, WORD wID, HWND hWndCtl, BO
 		CString str;
 		m_EditBox.GetWindowText(str);
 		str.TrimLeft(); str.TrimRight();
-		wchar_t *end;
-		COLORREF val=wcstol(str,&end,16)&0xFFFFFF;
+		COLORREF val=RgbToBgr(ParseColor(str));
 		static COLORREF customColors[16];
 		CHOOSECOLOR choose={sizeof(choose),m_hWnd,NULL,val,customColors};
 		choose.Flags=CC_ANYCOLOR|CC_FULLOPEN|CC_RGBINIT;
 		if (ChooseColor(&choose))
 		{
 			wchar_t text[100];
-			Sprintf(text,_countof(text),L"%06X",choose.rgbResult);
+			Sprintf(text,_countof(text),L"%06X",BgrToRgb(choose.rgbResult));
 			m_EditBox.SetWindowText(text);
 			ApplyEditBox();
 			m_Tree.Invalidate();
@@ -717,7 +727,11 @@ void CSkinSettingsDlg::ApplyEditBox( void )
 		CString str;
 		m_EditBox.GetWindowText(str);
 		str.TrimLeft(); str.TrimRight();
-		m_CurrentSkin.Options[m_EditItemIndex].sValue=str;
+		auto& option=m_CurrentSkin.Options[m_EditItemIndex];
+		if (option.type==SKIN_OPTION_COLOR)
+			option.sValue=RgbToBgr(str);
+		else
+			option.sValue=str;
 		StoreSkinOptions();
 	}
 }
@@ -730,7 +744,7 @@ void CSkinSettingsDlg::ItemSelected( HTREEITEM hItem, int index, bool bEnabled )
 		const MenuSkin::Option &option=m_CurrentSkin.Options[m_EditItemIndex];
 		wchar_t text[256];
 		if (option.bValue && option.type>SKIN_OPTION_BOOL)
-			Sprintf(text,_countof(text),L"%s: %s",option.label,option.sValue);
+			Sprintf(text,_countof(text),L"%s: %s",option.label,(option.type==SKIN_OPTION_COLOR)?BgrToRgb(option.sValue):option.sValue);
 		else
 			Sprintf(text,_countof(text),L"%s",option.label);
 		TVITEM item={TVIF_TEXT,m_EditItem,0,0,text};
@@ -745,7 +759,10 @@ void CSkinSettingsDlg::ItemSelected( HTREEITEM hItem, int index, bool bEnabled )
 		const MenuSkin::Option &option=m_CurrentSkin.Options[index];
 		if (option.type>SKIN_OPTION_BOOL)
 			mode=option.type;
-		text=option.sValue;
+		if (option.type==SKIN_OPTION_COLOR)
+			text=BgrToRgb(option.sValue);
+		else
+			text=option.sValue;
 	}
 
 	RECT rc;
@@ -1106,7 +1123,7 @@ L"ControlPanelItem.Label=$Menu.ControlPanel\n"
 L"ControlPanelItem.Tip=$Menu.ControlPanelTip\n"
 L"ControlPanelItem.Settings=TRACK_RECENT\n"
 L"PCSettingsItem.Command=pc_settings\n"
-L"PCSettingsItem.Icon=%windir%\\ImmersiveControlPanel\\SystemSettings.exe,10\n"
+L"PCSettingsItem.Link=shell:appsfolder\\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel\n"
 L"PCSettingsItem.Label=$Menu.PCSettings\n"
 L"PCSettingsItem.Settings=TRACK_RECENT\n"
 L"SecurityItem.Command=windows_security\n"
@@ -1229,7 +1246,7 @@ L"ControlPanelItem.Label=$Menu.ControlPanel\n"
 L"ControlPanelItem.Tip=$Menu.ControlPanelTip\n"
 L"ControlPanelItem.Settings=TRACK_RECENT\n"
 L"PCSettingsItem.Command=pc_settings\n"
-L"PCSettingsItem.Icon=%windir%\\ImmersiveControlPanel\\SystemSettings.exe,10\n"
+L"PCSettingsItem.Link=shell:appsfolder\\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel\n"
 L"PCSettingsItem.Label=$Menu.PCSettings\n"
 L"PCSettingsItem.Settings=TRACK_RECENT\n"
 L"SecurityItem.Command=windows_security\n"
@@ -3624,10 +3641,7 @@ void CCustomMenuDlg7::SerializeData( void )
 	stringBuilder.push_back(0);
 	CSettingsLockWrite lock;
 	m_pSetting->value=CComVariant(&stringBuilder[0]);
-	if (m_pSetting->value==m_pSetting->defValue)
-		m_pSetting->flags|=CSetting::FLAG_DEFAULT;
-	else
-		m_pSetting->flags&=~CSetting::FLAG_DEFAULT;
+	m_pSetting->flags&=~CSetting::FLAG_DEFAULT;
 	SetSettingsDirty();
 }
 
@@ -3854,10 +3868,7 @@ LRESULT CMenuStyleDlg::OnClick( WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL& 
 		CheckDlgButton(IDC_RADIO_CLASSIC,pSetting->value.intVal==MENU_CLASSIC1?BST_CHECKED:BST_UNCHECKED);
 		CheckDlgButton(IDC_RADIO_TWO_COLUMNS,pSetting->value.intVal==MENU_CLASSIC2?BST_CHECKED:BST_UNCHECKED);
 		CheckDlgButton(IDC_RADIO_WIN7,pSetting->value.intVal==MENU_WIN7?BST_CHECKED:BST_UNCHECKED);
-		if (pSetting->value==pSetting->defValue)
-			pSetting->flags|=CSetting::FLAG_DEFAULT;
-		else
-			pSetting->flags&=~CSetting::FLAG_DEFAULT;
+		pSetting->flags&=~CSetting::FLAG_DEFAULT;
 		SetSettingsDirty();
 
 		SetSettingsStyle(styleFlag,CSetting::FLAG_MENU_MASK);
@@ -3875,10 +3886,7 @@ LRESULT CMenuStyleDlg::OnEnabled( WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL
 		CSettingsLockWrite lock;
 		CSetting *pSetting=FindSetting(L"EnableStartButton");
 		pSetting->value=CComVariant(bEnabled);
-		if (pSetting->value==pSetting->defValue)
-			pSetting->flags|=CSetting::FLAG_DEFAULT;
-		else
-			pSetting->flags&=~CSetting::FLAG_DEFAULT;
+		pSetting->flags&=~CSetting::FLAG_DEFAULT;
 		SetSettingsDirty();
 	}
 	Update(false);
@@ -3917,10 +3925,7 @@ LRESULT CMenuStyleDlg::OnButtonStyle( WORD wNotifyCode, WORD wID, HWND hWndCtl, 
 		CSettingsLockWrite lock;
 		CSetting *pSetting=FindSetting(L"StartButtonType");
 		pSetting->value=CComVariant(style);
-		if (pSetting->value==pSetting->defValue)
-			pSetting->flags|=CSetting::FLAG_DEFAULT;
-		else
-			pSetting->flags&=~CSetting::FLAG_DEFAULT;
+		pSetting->flags&=~CSetting::FLAG_DEFAULT;
 		SetSettingsDirty();
 	}
 	Update(false);
@@ -3944,10 +3949,7 @@ LRESULT CMenuStyleDlg::OnPick( WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL& b
 			CSettingsLockWrite lock;
 			CSetting *pSetting=FindSetting(L"StartButtonPath");
 			pSetting->value=CComVariant(path);
-			if (pSetting->value==pSetting->defValue)
-				pSetting->flags|=CSetting::FLAG_DEFAULT;
-			else
-				pSetting->flags&=~CSetting::FLAG_DEFAULT;
+			pSetting->flags&=~CSetting::FLAG_DEFAULT;
 			SetSettingsDirty();
 		}
 		Update(true);
@@ -4353,11 +4355,13 @@ CSetting g_Settings[]={
 	{L"OpenTruePath",CSetting::TYPE_BOOL,IDS_OPEN_TRUE_PATH,IDS_OPEN_TRUE_PATH_TIP,1},
 	{L"EnableTouch",CSetting::TYPE_BOOL,IDS_ENABLE_TOUCH,IDS_ENABLE_TOUCH_TIP,1},
 	{L"EnableAccessibility",CSetting::TYPE_BOOL,IDS_ACCESSIBILITY,IDS_ACCESSIBILITY_TIP,1},
-	{L"ShowNextToTaskbar",CSetting::TYPE_BOOL,IDS_NEXTTASKBAR,IDS_NEXTTASKBAR_TIP,0},
+	{L"ShowNextToTaskbar",CSetting::TYPE_BOOL,IDS_NEXTTASKBAR,IDS_NEXTTASKBAR_TIP,1},
 	{L"PreCacheIcons",CSetting::TYPE_BOOL,IDS_CACHE_ICONS,IDS_CACHE_ICONS_TIP,1,CSetting::FLAG_COLD},
 	{L"DelayIcons",CSetting::TYPE_BOOL,IDS_DELAY_ICONS,IDS_DELAY_ICONS_TIP,1,CSetting::FLAG_COLD},
 	{L"BoldSettings",CSetting::TYPE_BOOL,IDS_BOLD_SETTINGS,IDS_BOLD_SETTINGS_TIP,1},
 	{L"ReportSkinErrors",CSetting::TYPE_BOOL,IDS_SKIN_ERRORS,IDS_SKIN_ERRORS_TIP,0},
+	{L"EnableAccelerators",CSetting::TYPE_BOOL,IDS_ENABLE_ACCELERATORS,IDS_ENABLE_ACCELERATORS_TIP,1},
+	{L"AltAccelerators",CSetting::TYPE_BOOL,IDS_ALT_ACCELERATORS,IDS_ALT_ACCELERATORS_TIP,0,0,L"EnableAccelerators",L"EnableAccelerators"},
 
 {L"SearchBoxSettings",CSetting::TYPE_GROUP,IDS_SEARCH_BOX},
 	{L"SearchBox",CSetting::TYPE_INT,IDS_SHOW_SEARCH_BOX,IDS_SHOW_SEARCH_BOX_TIP,SEARCHBOX_TAB,CSetting::FLAG_BASIC},
@@ -4586,10 +4590,7 @@ void UpgradeSettings( bool bShared )
 		items.Replace(L"Command=recent_items\n",L"Command=recent_programs\n");
 		items.Replace(L"Command=control_panel_categories\n",L"Command=control_panel\n");
 		pSettingItems->value=items;
-		if (pSettingItems->value==pSettingItems->defValue)
-			pSettingItems->flags|=CSetting::FLAG_DEFAULT;
-		else
-			pSettingItems->flags&=~CSetting::FLAG_DEFAULT;
+		pSettingItems->flags&=~CSetting::FLAG_DEFAULT;
 	}
 
 	// set initial menu style
@@ -4597,10 +4598,7 @@ void UpgradeSettings( bool bShared )
 	if (!pSettingStyle->IsLocked())
 	{
 		pSettingStyle->value=(bTwoColumns?1:0);
-		if (pSettingStyle->value==pSettingStyle->defValue)
-			pSettingStyle->flags|=CSetting::FLAG_DEFAULT;
-		else
-			pSettingStyle->flags&=~CSetting::FLAG_DEFAULT;
+		pSettingStyle->flags&=~CSetting::FLAG_DEFAULT;
 		SetSettingsStyle(bTwoColumns?CSetting::FLAG_MENU_CLASSIC2:CSetting::FLAG_MENU_CLASSIC1,CSetting::FLAG_MENU_MASK);
 	}
 
@@ -4612,10 +4610,7 @@ void UpgradeSettings( bool bShared )
 		if (!pSetting->IsDefault())
 		{
 			pSettingSkin->value=pSetting->value;
-			if (pSettingSkin->value==pSettingSkin->defValue)
-				pSettingSkin->flags|=CSetting::FLAG_DEFAULT;
-			else
-				pSettingSkin->flags&=~CSetting::FLAG_DEFAULT;
+			pSettingSkin->flags&=~CSetting::FLAG_DEFAULT;
 		}
 	}
 	CSetting *pSettingOpt=FindSetting(bTwoColumns?L"SkinOptionsC2":L"SkinOptionsC1");
@@ -4625,10 +4620,7 @@ void UpgradeSettings( bool bShared )
 		if (!pSetting->IsDefault())
 		{
 			pSettingOpt->value=pSetting->value;
-			if (pSettingOpt->value==pSettingOpt->defValue)
-				pSettingOpt->flags|=CSetting::FLAG_DEFAULT;
-			else
-				pSettingOpt->flags&=~CSetting::FLAG_DEFAULT;
+			pSettingOpt->flags&=~CSetting::FLAG_DEFAULT;
 		}
 	}
 	CSetting *pSettingVar=FindSetting(bTwoColumns?L"SkinVariationC2":L"SkinVariationC1");
@@ -4638,10 +4630,7 @@ void UpgradeSettings( bool bShared )
 		if (!pSetting->IsDefault())
 		{
 			pSettingVar->value=pSetting->value;
-			if (pSettingVar->value==pSettingVar->defValue)
-				pSettingVar->flags|=CSetting::FLAG_DEFAULT;
-			else
-				pSettingVar->flags&=~CSetting::FLAG_DEFAULT;
+			pSettingVar->flags&=~CSetting::FLAG_DEFAULT;
 		}
 	}
 
@@ -4653,10 +4642,7 @@ void UpgradeSettings( bool bShared )
 		if (!pSetting->IsDefault())
 		{
 			pSettingSkin->value=pSetting->value;
-			if (pSettingSkin->value==pSettingSkin->defValue)
-				pSettingSkin->flags|=CSetting::FLAG_DEFAULT;
-			else
-				pSettingSkin->flags&=~CSetting::FLAG_DEFAULT;
+			pSettingSkin->flags&=~CSetting::FLAG_DEFAULT;
 		}
 	}
 	pSettingOpt=FindSetting(L"SkinOptionsA");
@@ -4666,10 +4652,7 @@ void UpgradeSettings( bool bShared )
 		if (!pSetting->IsDefault())
 		{
 			pSettingOpt->value=pSetting->value;
-			if (pSettingOpt->value==pSettingOpt->defValue)
-				pSettingOpt->flags|=CSetting::FLAG_DEFAULT;
-			else
-				pSettingOpt->flags&=~CSetting::FLAG_DEFAULT;
+			pSettingOpt->flags&=~CSetting::FLAG_DEFAULT;
 		}
 	}
 	pSettingVar=FindSetting(L"SkinVariationA");
@@ -4679,12 +4662,51 @@ void UpgradeSettings( bool bShared )
 		if (!pSetting->IsDefault())
 		{
 			pSettingVar->value=pSetting->value;
-			if (pSettingVar->value==pSettingVar->defValue)
-				pSettingVar->flags|=CSetting::FLAG_DEFAULT;
-			else
-				pSettingVar->flags&=~CSetting::FLAG_DEFAULT;
+			pSettingVar->flags&=~CSetting::FLAG_DEFAULT;
 		}
 	}
+}
+
+static CString GetWindowsBrandingString()
+{
+	CString retval;
+
+	if (GetWinVersion() >= WIN_VER_WIN10)
+	{
+		auto winbrand = LoadLibraryEx(L"winbrand.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+		if (winbrand)
+		{
+			PWSTR (WINAPI * BrandingFormatString)(PCWSTR pstrFormat);
+			BrandingFormatString = (decltype(BrandingFormatString))GetProcAddress(winbrand, "BrandingFormatString");
+			if (BrandingFormatString)
+			{
+				auto osName = BrandingFormatString(L"%WINDOWS_LONG%");
+				if (osName)
+				{
+					retval = osName;
+					GlobalFree(osName);
+				}
+			}
+
+			FreeLibrary(winbrand);
+		}
+	}
+
+	if (retval.IsEmpty())
+	{
+		// fallback for older Windows
+		wchar_t title[256] = L"Windows";
+
+		if (CRegKey reg; reg.Open(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion", KEY_READ) == ERROR_SUCCESS)
+		{
+			ULONG size = _countof(title);
+			reg.QueryStringValue(L"ProductName", title, &size);
+		}
+
+		retval = title;
+	}
+
+	return retval;
 }
 
 void UpdateSettings( void )
@@ -4809,16 +4831,10 @@ void UpdateSettings( void )
 
 	UpdateSetting(L"NumericSort",CComVariant(SHRestricted(REST_NOSTRCMPLOGICAL)?0:1),false);
 
-	wchar_t title[256]=L"Windows";
-	ULONG size=_countof(title);
-	{
-		CRegKey regTitle;
-		if (regTitle.Open(HKEY_LOCAL_MACHINE,L"Software\\Microsoft\\Windows NT\\CurrentVersion",KEY_READ)==ERROR_SUCCESS)
-			regTitle.QueryStringValue(L"ProductName",title,&size);
-	}
-	UpdateSetting(L"MenuCaption",CComVariant(title),false);
+	UpdateSetting(L"MenuCaption",CComVariant(GetWindowsBrandingString()),false);
 
-	size=_countof(title);
+	wchar_t title[256]{};
+	ULONG size=_countof(title);
 	if (!GetUserNameEx(NameDisplay,title,&size))
 	{
 		// GetUserNameEx may fail (for example on Home editions). use the login name
@@ -4949,7 +4965,7 @@ void UpdateSettings( void )
 		if (GetWinVersion()>WIN_VER_WIN7)
 		{
 			int color=GetSystemGlassColor8();
-			UpdateSetting(L"TaskbarColor",CComVariant(((color&0xFF)<<16)|(color&0xFF00)|((color>>16)&0xFF)),false);
+			UpdateSetting(L"TaskbarColor",CComVariant(RgbToBgr(color)),false);
 		}
 
 		if (GetWinVersion()<=WIN_VER_WIN7)
@@ -5049,15 +5065,15 @@ void UpdateSettings( void )
 			HIGHCONTRAST contrast={sizeof(contrast)};
 			if (SystemParametersInfo(SPI_GETHIGHCONTRAST,sizeof(contrast),&contrast,0) && (contrast.dwFlags&HCF_HIGHCONTRASTON))
 			{
-				options1=L"CAPTION=1\nUSER_IMAGE=0\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nTHICK_BORDER=0\nSOLID_SELECTION=1";
-				options2=L"NO_ICONS=1\nUSER_IMAGE=1\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nTHICK_BORDER=0\nSOLID_SELECTION=1";
-				options3=L"USER_IMAGE=1\nSMALL_ICONS=0\nTHICK_BORDER=0\nSOLID_SELECTION=1";
+				options1=L"CAPTION=1\nUSER_IMAGE=0\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nTHICK_BORDER=0\nSOLID_SELECTION=1\n";
+				options2=L"NO_ICONS=1\nUSER_IMAGE=1\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nTHICK_BORDER=0\nSOLID_SELECTION=1\n";
+				options3=L"USER_IMAGE=1\nSMALL_ICONS=0\nTHICK_BORDER=0\nSOLID_SELECTION=1\n";
 			}
 			else
 			{
-				options1=L"CAPTION=1\nUSER_IMAGE=0\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nTHICK_BORDER=0\nSOLID_SELECTION=0";
-				options2=L"NO_ICONS=1\nUSER_IMAGE=1\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nTHICK_BORDER=0\nSOLID_SELECTION=0";
-				options3=L"USER_IMAGE=1\nSMALL_ICONS=0\nTHICK_BORDER=0\nSOLID_SELECTION=0";
+				options1=L"CAPTION=1\nUSER_IMAGE=0\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nTHICK_BORDER=0\nSOLID_SELECTION=0\n";
+				options2=L"NO_ICONS=1\nUSER_IMAGE=1\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nTHICK_BORDER=0\nSOLID_SELECTION=0\n";
+				options3=L"USER_IMAGE=1\nSMALL_ICONS=0\nTHICK_BORDER=0\nSOLID_SELECTION=0\n";
 			}
 		}
 		else if (GetWinVersion()<WIN_VER_WIN8)
@@ -5065,25 +5081,25 @@ void UpdateSettings( void )
 			BOOL comp=FALSE;
 			skin12=(SUCCEEDED(DwmIsCompositionEnabled(&comp)) && comp)?L"Windows Aero":L"Windows Basic";
 			skin3=L"Windows Aero";
-			options1=L"CAPTION=1\nUSER_IMAGE=0\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nLARGE_FONT=0\nDISABLE_MASK=0\nWHITE_SUBMENUS=1";
-			options2=L"NO_ICONS=1\nUSER_IMAGE=1\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nLARGE_FONT=0\nDISABLE_MASK=0\nWHITE_SUBMENUS=1";
-			options3=L"USER_IMAGE=1\nSMALL_ICONS=0\nLARGE_FONT=0\nDISABLE_MASK=0\nWHITE_SUBMENUS=1";
+			options1=L"CAPTION=1\nUSER_IMAGE=0\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nLARGE_FONT=0\nDISABLE_MASK=0\nWHITE_SUBMENUS=1\n";
+			options2=L"NO_ICONS=1\nUSER_IMAGE=1\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nLARGE_FONT=0\nDISABLE_MASK=0\nWHITE_SUBMENUS=1\n";
+			options3=L"USER_IMAGE=1\nSMALL_ICONS=0\nLARGE_FONT=0\nDISABLE_MASK=0\nWHITE_SUBMENUS=1\n";
 		}
 		else if (GetWinVersion()<WIN_VER_WIN10)
 		{
 			skin12=L"Windows 8";
 			skin3=L"Windows 8";
-			options1=L"CAPTION=1\nUSER_IMAGE=0\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nLARGE_FONT=0\nDISABLE_MASK=0\nOPAQUE=0\nWHITE_SUBMENUS=1";
-			options2=L"NO_ICONS=1\nUSER_IMAGE=1\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nLARGE_FONT=0\nDISABLE_MASK=0\nOPAQUE=0\nGLASS_SHADOW=0\nBLACK_TEXT=0\nBLACK_FRAMES=0\nWHITE_SUBMENUS=1";
-			options3=L"USER_IMAGE=1\nSMALL_ICONS=0\nLARGE_FONT=0\nDISABLE_MASK=0\nOPAQUE=0\nGLASS_SHADOW=0\nBLACK_TEXT=0\nBLACK_FRAMES=0\nWHITE_SUBMENUS=1";
+			options1=L"CAPTION=1\nUSER_IMAGE=0\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nLARGE_FONT=0\nDISABLE_MASK=0\nOPAQUE=0\nWHITE_SUBMENUS=1\n";
+			options2=L"NO_ICONS=1\nUSER_IMAGE=1\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nLARGE_FONT=0\nDISABLE_MASK=0\nOPAQUE=0\nGLASS_SHADOW=0\nBLACK_TEXT=0\nBLACK_FRAMES=0\nWHITE_SUBMENUS=1\n";
+			options3=L"USER_IMAGE=1\nSMALL_ICONS=0\nLARGE_FONT=0\nDISABLE_MASK=0\nOPAQUE=0\nGLASS_SHADOW=0\nBLACK_TEXT=0\nBLACK_FRAMES=0\nWHITE_SUBMENUS=1\n";
 		}
 		else
 		{
-			skin12=L"Metro";
-			skin3=L"Metro";
-			options1=L"CAPTION=1\nUSER_IMAGE=0\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nLARGE_FONT=0\nICON_FRAMES=1\nOPAQUE=0";
-			options2=L"NO_ICONS=1\nUSER_IMAGE=1\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nLARGE_FONT=0\nICON_FRAMES=1\nOPAQUE=0";
-			options3=L"USER_IMAGE=1\nSMALL_ICONS=0\nLARGE_FONT=0\nICON_FRAMES=1\nOPAQUE=0";
+			skin12=L"Immersive";
+			skin3=L"Immersive";
+			options1=L"CAPTION=1\nUSER_IMAGE=0\nUSER_NAME=0\nCENTER_NAME=0\nSMALL_ICONS=0\nLARGE_FONT=0\nICON_FRAMES=1\nOPAQUE=0\n";
+			options2=L"NO_ICONS=1\nUSER_IMAGE=1\nCENTER_NAME=0\nSMALL_ICONS=0\nLARGE_FONT=0\nICON_FRAMES=1\nOPAQUE=0\n";
+			options3=L"USER_IMAGE=1\nSMALL_ICONS=0\nLARGE_FONT=0\nICON_FRAMES=1\nOPAQUE=0\n";
 		}
 		UpdateSetting(L"SkinC1",CComVariant(skin12),false);
 		UpdateSetting(L"SkinOptionsC1",CComVariant(options1),false);
@@ -5256,7 +5272,7 @@ void EditSettings( bool bModal, int tab )
 		Sprintf(title,_countof(title),LoadStringEx(IDS_SETTINGS_TITLE_VER),ver>>24,(ver>>16)&0xFF,ver&0xFFFF);
 	else
 		Sprintf(title,_countof(title),LoadStringEx(IDS_SETTINGS_TITLE));
-	EditSettings(title,bModal,tab);
+	EditSettings(title,bModal,tab,L"OpenShell.StartMenu.Settings");
 }
 
 bool DllImportSettingsXml( const wchar_t *fname )
